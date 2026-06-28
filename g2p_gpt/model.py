@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from .helpers import make_causal_mask, sinusoidal_positional_encoding
+from ..helpers import make_causal_mask, sinusoidal_positional_encoding, tok_to_emb
 
 
 class TransformerEncoder(nn.Module):
@@ -118,20 +118,15 @@ class Transformer(nn.Module):
 
         self.ffnn = nn.Linear(in_features=d_model, out_features=vocab_size)
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor):
+    def forward(
+            self,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            causal_mask: torch.Tensor):
         # x input embeddings
-        # y shifted-right output embeddings
-
-        pos_enc = sinusoidal_positional_encoding(
-            y.shape[1], self.d_model, self.device).unsqueeze(0)
-
-        # print("pos enc shape", pos_enc.shape)
-        # print("x shape", x.shape)
-
-        z = x.clone() + pos_enc
-        y = y + pos_enc
-
-        causal_mask = make_causal_mask(y.shape[1])
+        # y right-shifted output embeddings
+        
+        z = x.clone()
 
         for enc in self.encoders:
             z = enc(z)
@@ -172,16 +167,20 @@ class G2P_GPT(nn.Module):
             num_heads, d_model, dff,
             num_enc_layers, num_dec_layers, vocab_size=4096)
 
-    def forward(self, toks: torch.Tensor):
+    def forward(self, toks: torch.Tensor, pos_enc: torch.Tensor, causal_mask: torch.Tensor):
         x3 = tok_to_emb(toks, self.emb3)
         x4 = tok_to_emb(toks, self.emb4)
         x5 = tok_to_emb(toks, self.emb5)
         x6 = tok_to_emb(toks, self.emb6)
 
-        out3 = self.transformer_3mer(x3[:, :-1, :], x3[:, 1:, :])
-        out4 = self.transformer_4mer(x4[:, :-1, :], x4[:, 1:, :])
-        out5 = self.transformer_5mer(x5[:, :-1, :], x5[:, 1:, :])
-        out6 = self.transformer_6mer(x6[:, :-1, :], x6[:, 1:, :])
+        out3 = self.transformer_3mer(
+            x3[:, :-1, :], x3[:, 1:, :], pos_enc, causal_mask)
+        out4 = self.transformer_4mer(
+            x4[:, :-1, :], x4[:, 1:, :], pos_enc, causal_mask)
+        out5 = self.transformer_5mer(
+            x5[:, :-1, :], x5[:, 1:, :], pos_enc, causal_mask)
+        out6 = self.transformer_6mer(
+            x6[:, :-1, :], x6[:, 1:, :], pos_enc, causal_mask)
 
         return {
             "3mer": out3,

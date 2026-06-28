@@ -1,3 +1,6 @@
+import torch
+
+
 def make_causal_mask(T: int, device=None):
     # returns: (T, T)
     return torch.triu(
@@ -27,3 +30,12 @@ def sinusoidal_positional_encoding(
     pe[:, 0::2] = torch.sin(position * div_term)
     return pe
 
+
+def tok_to_emb(tokens: torch.Tensor, embeddings):
+    # tokens : [B, T] tensor of token IDs
+    # embeddings : instance of torch.Embedding(V, d_model)
+
+    tokens = tokens.long()
+    x_emb = embeddings(tokens)
+
+    return x_emb
