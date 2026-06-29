@@ -63,6 +63,9 @@ def train(
     num_enc_layers = params['num_enc_layers']
     num_dec_layers = params['num_dec_layers']
 
+    if k_choices is None:
+        k_choices = [3, 4, 5, 6]
+
     if emb_dict is None:
         emb_dict = {
             3: nn.Embedding(64, d_model),
@@ -89,9 +92,6 @@ def train(
     token_embedding.train()
     positional_embedding.train()
 
-    if k_choices is None:
-        k_choices = [3, 4, 5, 6]
-
     for epoch in range(num_epochs):
         total_loss = 0.0
         total_tokens = 0
@@ -105,7 +105,7 @@ def train(
             vocab_size = (4 ** k)
             emb = emb_dict[k]
 
-            masked_tokens, patch_mask = mask_tokens(tokens, 0)
+            masked_tokens, patch_mask = mask_tokens(tokens, mask_token_id)
 
             input_emb = tok_to_emb(masked_tokens, emb)
             output_emb = tok_to_emb(tokens, emb)

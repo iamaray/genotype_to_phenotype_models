@@ -124,7 +124,6 @@ class Transformer(nn.Module):
             self,
             x: torch.Tensor,
             y: torch.Tensor,
-            # causal_mask: torch.Tensor,
             k: int):
         # x input embeddings
         # y right-shifted output embeddings
@@ -134,7 +133,6 @@ class Transformer(nn.Module):
         for enc in self.encoders:
             z = enc(z)
         for dec in self.decoders:
-            # y = dec(y, z, causal_mask)
             y = dec(y, z)
 
         y = self.ffnns[k](y)
@@ -148,56 +146,3 @@ class Transformer(nn.Module):
 
     def predict(self):
         pass
-
-
-# class G2P_GPT(nn.Module):
-#     def __init__(self,
-#                  num_heads: int,
-#                  d_model: int,
-#                  dff: int,
-#                  num_enc_layers: int = 6,
-#                  num_dec_layers: int = 6):
-#         super().__init__()
-
-#         self.emb3 = nn.Embedding(64, d_model)
-#         self.emb4 = nn.Embedding(256, d_model)
-#         self.emb5 = nn.Embedding(1024, d_model)
-#         self.emb6 = nn.Embedding(4096, d_model)
-
-#         self.transformer_3mer = Transformer(
-#             num_heads, d_model, dff,
-#             num_enc_layers, num_dec_layers, vocab_size=64)
-#         self.transformer_4mer = Transformer(
-#             num_heads, d_model, dff,
-#             num_enc_layers, num_dec_layers, vocab_size=256)
-#         self.transformer_5mer = Transformer(
-#             num_heads, d_model, dff,
-#             num_enc_layers, num_dec_layers, vocab_size=1024)
-#         self.transformer_6mer = Transformer(
-#             num_heads, d_model, dff,
-#             num_enc_layers, num_dec_layers, vocab_size=4096)
-
-#     def forward(self, toks: torch.Tensor, pos_enc: torch.Tensor, causal_mask: torch.Tensor):
-#         x3 = tok_to_emb(toks, self.emb3)
-#         x4 = tok_to_emb(toks, self.emb4)
-#         x5 = tok_to_emb(toks, self.emb5)
-#         x6 = tok_to_emb(toks, self.emb6)
-
-#         out3 = self.transformer_3mer(
-#             x3[:, :-1, :], x3[:, 1:, :], pos_enc, causal_mask)
-#         out4 = self.transformer_4mer(
-#             x4[:, :-1, :], x4[:, 1:, :], pos_enc, causal_mask)
-#         out5 = self.transformer_5mer(
-#             x5[:, :-1, :], x5[:, 1:, :], pos_enc, causal_mask)
-#         out6 = self.transformer_6mer(
-#             x6[:, :-1, :], x6[:, 1:, :], pos_enc, causal_mask)
-
-#         return {
-#             "3mer": out3,
-#             "4mer": out4,
-#             "5mer": out5,
-#             "6mer": out6
-#         }
-
-#     def predict(self):
-#         pass
