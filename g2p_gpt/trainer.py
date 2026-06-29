@@ -1,8 +1,34 @@
+import random
+import math
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from ..helpers import make_causal_mask, sinusoidal_positional_encoding, tok_to_emb
+from .model import Transformer
+
+
+def mask_tokens(tokens: torch.Tensor, mask_token_id: int, device: torch.device):
+    # tokens : (B, T)
+    # returns patched tokens (B,T) and a boolean patch mask (True where tokens patched)
+
+    masked_tokens = tokens.clone()
+    patch_mask = torch.zeros(
+        tokens.shape[0], tokens.shape[1], dtype=torch.bool, device=device)
+
+    for b in range(tokens.shape[0]):
+        a = random.randint(0, T - 1)
+        b = random.randint(0, T - 1)
+        while math.fabs(a - b) <= 2:
+            b = random.randint(0, T - 1)
+
+        start = min(a, b)
+        end = max(a, b)
+
+        masked_tokens[b, start:end] = mask_token_id
+        patch_mask[b, start:end] = True
+
+    return masked_tokens, patch_mask
 
 
 def train(
@@ -11,6 +37,7 @@ def train(
         val_loader: DataLoader,
         num_epochs: int,
         lr: float = 3e-4,
+        mask_token_id: int = 0,
         pad_token_id: int | None = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu"):
     """ Trains k-mer embeddings on their respective next k-mer token 
@@ -34,32 +61,19 @@ def train(
     num_enc_layers = params['num_enc_layers']
     num_dec_layers = params['num_dec_layers']
 
-    emb3 = nn.Embedding(64, d_model)
-    emb4 = nn.Embedding(256, d_model)
-    emb5 = nn.Embedding(1024, d_model)
-    emb6 = nn.Embedding(4096, d_model)
+    emb_dict = {
+        3: nn.Embedding(64, d_model),
+        4: nn.Embedding(256, d_model),
+        5: nn.Embedding(1024, d_model),
+        6: nn.Embedding(4096, d_model)
+    }
 
-    transformer_3mer = Transformer(
-        num_heads, d_model, dff,
-        num_enc_layers, num_dec_layers, vocab_size=64).to(device)
-    transformer_4mer = Transformer(
-        num_heads, d_model, dff,
-        num_enc_layers, num_dec_layers, vocab_size=256).to(device)
-    transformer_5mer = Transformer(
-        num_heads, d_model, dff,
-        num_enc_layers, num_dec_layers, vocab_size=1024).to(device)
-    transformer_6mer = Transformer(
-        num_heads, d_model, dff,
-        num_enc_layers, num_dec_layers, vocab_size=4096).to(device)
-
-    model_param_list = list(transformer_3mer.parameters()) + list(transformer_3mer.parameters()) + list(
-        transformer_4mer.parameters()) + list(transformer_5mer.parameters()) + list(transformer_6mer.parameters())
-
+    transformer = Transformer(num_heads, d_model, dff,
+                              num_enc_layers, num_dec_layers)
     embed_param_list = list(model.parameters()) + list(emb3.parameters()) + list(
         emb4.parameters()) + list(emb5.parameters()) + list(emb6.parameters())
-
     optimizer = torch.optim.AdamW(
-        model_param_list + embed_param_list,
+        list(transformer.parameters()) + embed_param_list,
         lr=lr,
     )
 
@@ -79,42 +93,21 @@ def train(
         for batch in dataloader:
             # (B, T)
             tokens = batch.to(device)
-
-            # input_tokens:  (B, T-1)
-            # target_tokens: (B, T-1)
-            input_tokens = tokens[:, :-1]
-            target_tokens = tokens[:, 1:]
-
             B, T = input_tokens.shape
 
-            # (T-1, d_model)
-            pos_enc = sinusoidal_positional_encoding(T, d_model, device)
+            k = random.choice([3, 4, 5, 6])
+            emb = emb_dict[k]
 
-            # (B, T-1, d_model)
-            x_emb3 = tok_to_emb(input_tokens, emb3) + pos_enc.unsqueeze(0)
-            y_emb3 = tok_to_emb(target_tokens, emb3) + pos_enc.unsqueeze(0)
+            masked_tokens, patch_mask = mask_tokens(tokens, 0)
 
-            x_emb4 = tok_to_emb(input_tokens, emb4) + pos_enc.unsqueeze(0)
-            y_emb4 = tok_to_emb(target_tokens, emb4) + pos_enc.unsqueeze(0)
+            input_emb = tok_to_emb(masked_tokens, emb)
+            output_emb = tok_to_emb(tokens, emb)
 
-            x_emb5 = tok_to_emb(input_tokens, emb5) + pos_enc.unsqueeze(0)
-            y_emb5 = tok_to_emb(target_tokens, emb5) + pos_enc.unsqueeze(0)
-
-            x_emb6 = tok_to_emb(input_tokens, emb6) + pos_enc.unsqueeze(0)
-            y_emb6 = tok_to_emb(target_tokens, emb6) + pos_enc.unsqueeze(0)
-
-            # causal_mask: (T, T)
-            causal_mask = make_causal_mask(T, device)
-
-            # (B, T, vocab_size)
-            logits3 = transformer(x_emb3, y_emb3, causal_mask)
-            logits4 = transformer(x_emb4, y_emb4, causal_mask)
-            logits5 = transformer(x_emb5, y_emb5, causal_mask)
-            logits6 = transformer(x_emb6, y_emb6, causal_mask)
+            logits = transformer(input_emb, output_emb, k)
 
             loss = criterion(
-                logits.reshape(B * T, vocab_size),
-                target_tokens.reshape(B * T),
+                logits[patch_mask].reshape(B * T, vocab_size),
+                tokens[patch_mask].reshape(B * T),
             )
 
             optimizer.zero_grad(set_to_none=True)
