@@ -39,6 +39,8 @@ def train(
         lr: float = 3e-4,
         mask_token_id: int = 0,
         pad_token_id: int | None = None,
+        k_choices: list | None = None,
+        emb_dict: dict | None = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu"):
     """ Trains k-mer embeddings on their respective next k-mer token 
         prediction tasks via vanilla transformer models.
@@ -61,12 +63,13 @@ def train(
     num_enc_layers = params['num_enc_layers']
     num_dec_layers = params['num_dec_layers']
 
-    emb_dict = {
-        3: nn.Embedding(64, d_model),
-        4: nn.Embedding(256, d_model),
-        5: nn.Embedding(1024, d_model),
-        6: nn.Embedding(4096, d_model)
-    }
+    if emb_dict is None:
+        emb_dict = {
+            3: nn.Embedding(64, d_model),
+            4: nn.Embedding(256, d_model),
+            5: nn.Embedding(1024, d_model),
+            6: nn.Embedding(4096, d_model)
+        }
 
     transformer = Transformer(num_heads, d_model, dff,
                               num_enc_layers, num_dec_layers)
@@ -86,6 +89,9 @@ def train(
     token_embedding.train()
     positional_embedding.train()
 
+    if k_choices is None:
+        k_choices = [3, 4, 5, 6]
+
     for epoch in range(num_epochs):
         total_loss = 0.0
         total_tokens = 0
@@ -95,7 +101,8 @@ def train(
             tokens = batch.to(device)
             B, T = input_tokens.shape
 
-            k = random.choice([3, 4, 5, 6])
+            k = random.choice(k_choices)
+            vocab_size = (4 ** k)
             emb = emb_dict[k]
 
             masked_tokens, patch_mask = mask_tokens(tokens, 0)
