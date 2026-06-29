@@ -1,5 +1,6 @@
 import random
 import math
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -31,8 +32,93 @@ def mask_tokens(tokens: torch.Tensor, mask_token_id: int, device: torch.device):
     return masked_tokens, patch_mask
 
 
+class PreTrainRecord:
+    def __init__(
+            self,
+            job_id: string,
+            num_epochs: int,
+            embeddings,
+            mask_token_id: int,
+            pad_token_id: int,
+            k_choices: list):
+
+        self.job_id = job_id
+
+        self.num_epochs = num_epochs
+        self.embeddings = embeddings
+        self.mask_token_id = mask_token_id
+        self.pad_token_id = pad_token_id
+
+        # avg train loss per epoch
+        self.train_loss_record = np.zeros(num_epochs)
+        # ppl per epoch
+        self.train_ppl_record = np.zeros(num_epochs)
+        # tokens used per epoch per k-mer
+        self.train_tokens_record = {k: np.zeros(num_epochs) for k in k_choices}
+
+        # avg val loss per epoch
+        self.val_loss_record = np.zeros(num_epochs)
+        # avg val loss per epoch
+        self.val_ppl_record = np.zeros(num_epochs)
+        # tokens used per epoch per k-mer
+        self.train_val_record = {k: np.zeros(num_epochs) for k in k_choices}
+
+    def log_train_loss(
+            self,
+            epoch,
+            loss,
+            ppl):
+        pass
+
+    def log_train_tokens(
+            self,
+            epoch,
+            k,
+            num_tokens):
+
+        self.train_tokens_record[k][epoch] += num_tokens
+
+    def log_val_loss(
+            self,
+            epoch,
+            avg_loss,
+            ppl):
+        pass
+
+    def log_val_tokens(
+            self,
+            epoch,
+            k,
+            num_tokens):
+
+        self.val_tokens_record[k][epoch] += num_tokens
+
+    def visualize_records_to_png(self):
+        pass
+
+    def save_records_to_json(self):
+        pass
+
+
+def checkpoint_model_weights():
+    pass
+
+
+def checkpoint_embeddings():
+    pass
+
+
+def train_epoch():
+    pass
+
+
+def val_epoch():
+    pass
+
+
 def train(
-        params: dict,
+        recorder: PreTrainRecord,
+        model_config: dict,
         train_loader: DataLoader,
         val_loader: DataLoader,
         num_epochs: int,
@@ -46,7 +132,7 @@ def train(
         prediction tasks via vanilla transformer models.
 
     Args:
-        params (dict): _description_
+        model_config (dict): _description_
         train_loader (DataLoader): _description_
         val_loader (DataLoader): _description_
         num_epochs (int): _description_
@@ -57,14 +143,11 @@ def train(
 
     device = torch.device(device)
 
-    d_model = params['d_model']
-    num_heads = params['num_heads']
-    dff = params['dff']
-    num_enc_layers = params['num_enc_layers']
-    num_dec_layers = params['num_dec_layers']
-
-    if k_choices is None:
-        k_choices = [3, 4, 5, 6]
+    d_model = model_config['d_model']
+    num_heads = model_config['num_heads']
+    dff = model_config['dff']
+    num_enc_layers = model_config['num_enc_layers']
+    num_dec_layers = model_config['num_dec_layers']
 
     if emb_dict is None:
         emb_dict = {
@@ -73,6 +156,9 @@ def train(
             5: nn.Embedding(1024, d_model),
             6: nn.Embedding(4096, d_model)
         }
+
+    if k_choices is None:
+        k_choices = emb_dict.keys()
 
     transformer = Transformer(num_heads, d_model, dff,
                               num_enc_layers, num_dec_layers)
@@ -110,6 +196,7 @@ def train(
             input_emb = tok_to_emb(masked_tokens, emb)
             output_emb = tok_to_emb(tokens, emb)
 
+            # (B, T, vocab_size)
             logits = transformer(input_emb, output_emb, k)
 
             loss = criterion(
