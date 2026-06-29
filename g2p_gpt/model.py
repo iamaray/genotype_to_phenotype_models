@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 
-from ..helpers import make_causal_mask, sinusoidal_positional_encoding, tok_to_emb
-
 
 class TransformerEncoder(nn.Module):
     def __init__(self, num_heads: int, d_model: int, dff: int):
@@ -115,10 +113,10 @@ class Transformer(nn.Module):
             [TransformerDecoder(num_heads, d_model, dff)
              for _ in range(num_dec_layers)])
 
-        self.ffnns = {3: nn.Linear(in_features=d_model, out_features=64),
-                      4: nn.Linear(in_features=d_model, out_features=256),
-                      5: nn.Linear(in_features=d_model, out_features=1024),
-                      6: nn.Linear(in_features=d_model, out_features=4096)}
+        self.ffnns = nn.ModuleDict({
+            str(k): nn.Linear(in_features=d_model, out_features=4 ** k)
+            for k in (3, 4, 5, 6)
+        })
 
     def forward(
             self,
@@ -135,7 +133,7 @@ class Transformer(nn.Module):
         for dec in self.decoders:
             y = dec(y, z)
 
-        y = self.ffnns[k](y)
+        y = self.ffnns[str(k)](y)
         return y
 
     def encode(self):
