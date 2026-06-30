@@ -1,6 +1,7 @@
 import random
 import math
 import json
+from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -152,9 +153,98 @@ def checkpoint_embeddings(emb_dict, path):
     return path
 
 
+def checkpoint_pretraining_state(model, emb_dict, recorder, checkpoint_dir):
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_model_weights(model, checkpoint_dir / "model_weights.pt")
+    checkpoint_embeddings(emb_dict, checkpoint_dir / "embeddings.pt")
+    recorder.save_records_to_json(checkpoint_dir / "pretrain_record.json")
+    return checkpoint_dir
+
+
 def _batch_tokens(batch, device):
     tokens = batch[0] if isinstance(batch, (list, tuple)) else batch
     return tokens.to(device)
+
+
+def _run_causal_batch(
+        transformer,
+        emb_dict,
+        batch,
+        criterion,
+        recorder,
+        k_choices,
+        _mask_token_id,
+        device):
+    tokens = _batch_tokens(batch, device)
+    k = random.choice(k_choices)
+    input_tokens = tokens[:, :-1]
+    targets = tokens[:, 1:]
+    seq_len = input_tokens.size(1)
+    if seq_len == 0:
+        return None
+
+    causal_mask = make_causal_mask(seq_len, device=device)
+    key_padding_mask = (
+        input_tokens.eq(recorder.pad_token_id)
+        if recorder.pad_token_id is not None
+        else None
+    )
+    logits = transformer(
+        tok_to_emb(input_tokens, emb_dict[k]),
+        tok_to_emb(input_tokens, emb_dict[k]),
+        k,
+        src_mask=causal_mask,
+        tgt_mask=causal_mask,
+        memory_mask=causal_mask,
+        src_key_padding_mask=key_padding_mask,
+        tgt_key_padding_mask=key_padding_mask,
+    )
+    loss = criterion(
+        logits.reshape(-1, logits.size(-1)),
+        targets.reshape(-1),
+    )
+    num_tokens = (
+        targets.ne(recorder.pad_token_id).sum().item()
+        if recorder.pad_token_id is not None
+        else targets.numel()
+    )
+    return loss, num_tokens, k
+
+
+def _run_acausal_batch(
+        transformer,
+        emb_dict,
+        batch,
+        criterion,
+        _recorder,
+        k_choices,
+        mask_token_id,
+        device):
+    tokens = _batch_tokens(batch, device)
+    k = random.choice(k_choices)
+    masked_tokens, patch_mask = mask_tokens(tokens, mask_token_id)
+    logits = transformer(
+        tok_to_emb(masked_tokens, emb_dict[k]),
+        tok_to_emb(tokens, emb_dict[k]),
+        k,
+    )
+    targets = tokens[patch_mask]
+    loss = criterion(logits[patch_mask], targets)
+    return loss, targets.numel(), k
+
+
+def _update_from_batch(loss, optimizer):
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+
+def _log_batch_tokens(recorder, is_train, epoch, k, num_tokens):
+    if is_train:
+        recorder.log_train_tokens(epoch, k, num_tokens)
+    else:
+        recorder.log_val_tokens(epoch, k, num_tokens)
 
 
 def _run_epoch(
@@ -174,80 +264,30 @@ def _run_epoch(
         emb.train(is_train)
 
     is_causal = transformer.causal
+    batch_step = _run_causal_batch if is_causal else _run_acausal_batch
     total_loss, total_tokens = 0.0, 0
     with torch.set_grad_enabled(is_train):
-        if is_causal:
-            for batch in loader:
-                tokens = _batch_tokens(batch, device)
-                k = random.choice(k_choices)
-                input_tokens = tokens[:, :-1]
-                targets = tokens[:, 1:]
-                seq_len = input_tokens.size(1)
-                if seq_len == 0:
-                    continue
+        for batch in loader:
+            result = batch_step(
+                transformer,
+                emb_dict,
+                batch,
+                criterion,
+                recorder,
+                k_choices,
+                mask_token_id,
+                device,
+            )
+            if result is None:
+                continue
 
-                causal_mask = make_causal_mask(seq_len, device=device)
-                key_padding_mask = (
-                    input_tokens.eq(recorder.pad_token_id)
-                    if recorder.pad_token_id is not None
-                    else None
-                )
-                logits = transformer(
-                    tok_to_emb(input_tokens, emb_dict[k]),
-                    tok_to_emb(input_tokens, emb_dict[k]),
-                    k,
-                    src_mask=causal_mask,
-                    tgt_mask=causal_mask,
-                    memory_mask=causal_mask,
-                    src_key_padding_mask=key_padding_mask,
-                    tgt_key_padding_mask=key_padding_mask,
-                )
-                loss = criterion(
-                    logits.reshape(-1, logits.size(-1)),
-                    targets.reshape(-1),
-                )
-                num_tokens = (
-                    targets.ne(recorder.pad_token_id).sum().item()
-                    if recorder.pad_token_id is not None
-                    else targets.numel()
-                )
+            loss, num_tokens, k = result
+            if is_train:
+                _update_from_batch(loss, optimizer)
 
-                if is_train:
-                    optimizer.zero_grad(set_to_none=True)
-                    loss.backward()
-                    optimizer.step()
-
-                total_loss += loss.item() * num_tokens
-                total_tokens += num_tokens
-                if is_train:
-                    recorder.log_train_tokens(epoch, k, num_tokens)
-                else:
-                    recorder.log_val_tokens(epoch, k, num_tokens)
-        else:
-            for batch in loader:
-                tokens = _batch_tokens(batch, device)
-                k = random.choice(k_choices)
-                masked_tokens, patch_mask = mask_tokens(tokens, mask_token_id)
-                logits = transformer(
-                    tok_to_emb(masked_tokens, emb_dict[k]),
-                    tok_to_emb(tokens, emb_dict[k]),
-                    k,
-                )
-                targets = tokens[patch_mask]
-                loss = criterion(logits[patch_mask], targets)
-                num_tokens = targets.numel()
-
-                if is_train:
-                    optimizer.zero_grad(set_to_none=True)
-                    loss.backward()
-                    optimizer.step()
-
-                total_loss += loss.item() * num_tokens
-                total_tokens += num_tokens
-                if is_train:
-                    recorder.log_train_tokens(epoch, k, num_tokens)
-                else:
-                    recorder.log_val_tokens(epoch, k, num_tokens)
+            total_loss += loss.item() * num_tokens
+            total_tokens += num_tokens
+            _log_batch_tokens(recorder, is_train, epoch, k, num_tokens)
 
     avg_loss = total_loss / total_tokens if total_tokens else float("nan")
     ppl = math.exp(avg_loss)
@@ -307,6 +347,7 @@ def train(
         pad_token_id: int | None = None,
         k_choices: list | None = None,
         emb_dict: dict | None = None,
+        checkpoint_frequency: int = 1000,
         device: str = "cuda" if torch.cuda.is_available() else "cpu"):
     """ Trains k-mer embeddings on their respective next k-mer token 
         prediction tasks via vanilla transformer models.
@@ -322,6 +363,7 @@ def train(
     """
 
     device = torch.device(device)
+    assert checkpoint_frequency >= 1
 
     model_id = model_config.get('id', job_name)
     is_causal = model_config.get('causal', False)
@@ -381,6 +423,7 @@ def train(
     else:
         criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
 
+    checkpoint_dir = Path("pretraining") / job_name
     for epoch in range(num_epochs):
         train_loss, train_ppl = train_epoch(
             transformer, emb_dict, train_loader, criterion, optimizer,
@@ -395,4 +438,15 @@ def train(
             f"val_loss={val_loss:.4f}, val_ppl={val_ppl:.2f}"
         )
 
+        checkpoint_num = epoch + 1
+        if checkpoint_num % checkpoint_frequency == 0:
+            checkpoint_pretraining_state(
+                transformer,
+                emb_dict,
+                recorder,
+                checkpoint_dir / str(checkpoint_num),
+            )
+
+    checkpoint_pretraining_state(
+        transformer, emb_dict, recorder, checkpoint_dir)
     return transformer, emb_dict, recorder
