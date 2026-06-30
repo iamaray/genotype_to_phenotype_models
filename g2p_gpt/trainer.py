@@ -4,9 +4,8 @@ import json
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
 
-from helpers import tok_to_emb
+from helpers import make_causal_mask, tok_to_emb
 from .model import Transformer
 
 
@@ -60,6 +59,8 @@ class PreTrainRecord:
         self.embeddings = embeddings
         self.mask_token_id = mask_token_id
         self.pad_token_id = pad_token_id
+        self.trained_causally = False
+        self.trained_acausally = False
 
         self.train_loss_record = [0.0] * num_epochs
         self.train_ppl_record = [0.0] * num_epochs
@@ -101,7 +102,14 @@ class PreTrainRecord:
 
         self.val_tokens_record[k][epoch] += num_tokens
 
+    def mark_trained(self, causal: bool):
+        if causal:
+            self.trained_causally = True
+        else:
+            self.trained_acausally = True
+
     def visualize_records_to_png(self, path):
+        import matplotlib.pyplot as plt
 
         epochs = range(1, self.num_epochs + 1)
         plt.figure(figsize=(8, 4))
@@ -118,6 +126,10 @@ class PreTrainRecord:
     def save_records_to_json(self, path):
         records = {
             "job_id": self.job_id,
+            "model_id": self.model_id,
+            "job_type": self.job_type,
+            "trained_causally": self.trained_causally,
+            "trained_acausally": self.trained_acausally,
             "train_loss": self.train_loss_record,
             "train_ppl": self.train_ppl_record,
             "train_tokens": self.train_tokens_record,
@@ -161,36 +173,92 @@ def _run_epoch(
     for emb in emb_dict.values():
         emb.train(is_train)
 
+    is_causal = transformer.causal
     total_loss, total_tokens = 0.0, 0
     with torch.set_grad_enabled(is_train):
-        for batch in loader:
-            tokens = _batch_tokens(batch, device)
-            k = random.choice(k_choices)
-            masked_tokens, patch_mask = mask_tokens(tokens, mask_token_id)
-            logits = transformer(
-                tok_to_emb(masked_tokens, emb_dict[k]),
-                tok_to_emb(tokens, emb_dict[k]),
-                k,
-            )
-            targets = tokens[patch_mask]
-            loss = criterion(logits[patch_mask], targets)
+        if is_causal:
+            for batch in loader:
+                tokens = _batch_tokens(batch, device)
+                k = random.choice(k_choices)
+                input_tokens = tokens[:, :-1]
+                targets = tokens[:, 1:]
+                seq_len = input_tokens.size(1)
+                if seq_len == 0:
+                    continue
 
-            if is_train:
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                optimizer.step()
+                causal_mask = make_causal_mask(seq_len, device=device)
+                key_padding_mask = (
+                    input_tokens.eq(recorder.pad_token_id)
+                    if recorder.pad_token_id is not None
+                    else None
+                )
+                logits = transformer(
+                    tok_to_emb(input_tokens, emb_dict[k]),
+                    tok_to_emb(input_tokens, emb_dict[k]),
+                    k,
+                    src_mask=causal_mask,
+                    tgt_mask=causal_mask,
+                    memory_mask=causal_mask,
+                    src_key_padding_mask=key_padding_mask,
+                    tgt_key_padding_mask=key_padding_mask,
+                )
+                loss = criterion(
+                    logits.reshape(-1, logits.size(-1)),
+                    targets.reshape(-1),
+                )
+                num_tokens = (
+                    targets.ne(recorder.pad_token_id).sum().item()
+                    if recorder.pad_token_id is not None
+                    else targets.numel()
+                )
 
-            num_tokens = targets.numel()
-            total_loss += loss.item() * num_tokens
-            total_tokens += num_tokens
-            if is_train:
-                recorder.log_train_tokens(epoch, k, num_tokens)
-            else:
-                recorder.log_val_tokens(epoch, k, num_tokens)
+                if is_train:
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    optimizer.step()
+
+                total_loss += loss.item() * num_tokens
+                total_tokens += num_tokens
+                if is_train:
+                    recorder.log_train_tokens(epoch, k, num_tokens)
+                else:
+                    recorder.log_val_tokens(epoch, k, num_tokens)
+        else:
+            for batch in loader:
+                tokens = _batch_tokens(batch, device)
+                k = random.choice(k_choices)
+                masked_tokens, patch_mask = mask_tokens(tokens, mask_token_id)
+                logits = transformer(
+                    tok_to_emb(masked_tokens, emb_dict[k]),
+                    tok_to_emb(tokens, emb_dict[k]),
+                    k,
+                )
+                targets = tokens[patch_mask]
+                loss = criterion(logits[patch_mask], targets)
+                num_tokens = targets.numel()
+
+                if is_train:
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    optimizer.step()
+
+                total_loss += loss.item() * num_tokens
+                total_tokens += num_tokens
+                if is_train:
+                    recorder.log_train_tokens(epoch, k, num_tokens)
+                else:
+                    recorder.log_val_tokens(epoch, k, num_tokens)
 
     avg_loss = total_loss / total_tokens if total_tokens else float("nan")
     ppl = math.exp(avg_loss)
     if is_train:
+        transformer.trained_causally = (
+            transformer.trained_causally or is_causal
+        )
+        transformer.trained_acausally = (
+            transformer.trained_acausally or not is_causal
+        )
+        recorder.mark_trained(is_causal)
         recorder.log_train_loss(epoch, avg_loss, ppl)
     else:
         recorder.log_val_loss(epoch, avg_loss, ppl)
@@ -229,8 +297,6 @@ def val_epoch(
 
 
 def train(
-        # the train record should be initialized within this function
-        # recorder: PreTrainRecord,
         job_name: str,
         model_config: dict,
         train_loader: DataLoader,
@@ -257,8 +323,12 @@ def train(
 
     device = torch.device(device)
 
-    model_id = model_config['id']
-    is_causal = model_config['causal']
+    model_id = model_config.get('id', job_name)
+    is_causal = model_config.get('causal', False)
+    job_type = model_config.get(
+        'job_type',
+        "next-token" if is_causal else "patch",
+    )
     d_model = model_config['d_model']
     num_heads = model_config['num_heads']
     dff = model_config['dff']
@@ -276,8 +346,27 @@ def train(
     if k_choices is None:
         k_choices = list(emb_dict.keys())
 
-    transformer = Transformer(num_heads, d_model, dff,
-                              num_enc_layers, num_dec_layers).to(device)
+    recorder = PreTrainRecord(
+        job_id=job_name,
+        model_id=model_id,
+        job_type=job_type,
+        num_epochs=num_epochs,
+        embeddings=emb_dict,
+        mask_token_id=mask_token_id,
+        pad_token_id=pad_token_id,
+        k_choices=k_choices,
+    )
+
+    transformer = Transformer(
+        model_id,
+        num_heads,
+        d_model,
+        dff,
+        num_enc_layers,
+        num_dec_layers,
+        k_choices=k_choices,
+        causal=is_causal,
+    ).to(device)
     emb_dict = {k: emb.to(device) for k, emb in emb_dict.items()}
     embed_param_list = [
         param for emb in emb_dict.values() for param in emb.parameters()

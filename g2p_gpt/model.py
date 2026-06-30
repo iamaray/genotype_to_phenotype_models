@@ -135,6 +135,8 @@ class Transformer(nn.Module):
         self.model_id = model_id
         self.d_model = d_model
         self.causal = causal
+        self.trained_causally = False
+        self.trained_acausally = False
 
         self.device = torch.device(
             'cuda' if torch.cuda.is_available() else 'cpu')
@@ -151,6 +153,12 @@ class Transformer(nn.Module):
             str(k): nn.Linear(in_features=d_model, out_features=4 ** k)
             for k in k_choices
         })
+
+    def switch_task(self):
+        self.causal = not self.causal
+        for decoder in self.decoders:
+            decoder.causal = self.causal
+        return self.causal
 
     def forward(
             self,
