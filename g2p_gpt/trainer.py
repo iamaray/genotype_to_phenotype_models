@@ -4,6 +4,7 @@ import json
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+import matplotlib.pyplot as plt
 
 from helpers import tok_to_emb
 from .model import Transformer
@@ -41,6 +42,8 @@ class PreTrainRecord:
     def __init__(
             self,
             job_id: str,
+            model_id: str,
+            job_type: str,
             num_epochs: int,
             embeddings,
             mask_token_id: int,
@@ -48,24 +51,22 @@ class PreTrainRecord:
             k_choices: list):
 
         self.job_id = job_id
+        self.model_id = model_id
+        if job_type not in ("next-token", "patch"):
+            raise ValueError("Unrecognized job type.")
+        self.job_type = job_type
 
         self.num_epochs = num_epochs
         self.embeddings = embeddings
         self.mask_token_id = mask_token_id
         self.pad_token_id = pad_token_id
 
-        # avg train loss per epoch
         self.train_loss_record = [0.0] * num_epochs
-        # ppl per epoch
         self.train_ppl_record = [0.0] * num_epochs
-        # tokens used per epoch per k-mer
         self.train_tokens_record = {k: [0] * num_epochs for k in k_choices}
 
-        # avg val loss per epoch
         self.val_loss_record = [0.0] * num_epochs
-        # avg val loss per epoch
         self.val_ppl_record = [0.0] * num_epochs
-        # tokens used per epoch per k-mer
         self.val_tokens_record = {k: [0] * num_epochs for k in k_choices}
 
     def log_train_loss(
@@ -101,7 +102,6 @@ class PreTrainRecord:
         self.val_tokens_record[k][epoch] += num_tokens
 
     def visualize_records_to_png(self, path):
-        import matplotlib.pyplot as plt
 
         epochs = range(1, self.num_epochs + 1)
         plt.figure(figsize=(8, 4))
@@ -229,7 +229,9 @@ def val_epoch(
 
 
 def train(
-        recorder: PreTrainRecord,
+        # the train record should be initialized within this function
+        # recorder: PreTrainRecord,
+        job_name: str,
         model_config: dict,
         train_loader: DataLoader,
         val_loader: DataLoader,
@@ -255,6 +257,8 @@ def train(
 
     device = torch.device(device)
 
+    model_id = model_config['id']
+    is_causal = model_config['causal']
     d_model = model_config['d_model']
     num_heads = model_config['num_heads']
     dff = model_config['dff']
