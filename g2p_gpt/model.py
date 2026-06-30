@@ -138,9 +138,6 @@ class Transformer(nn.Module):
         self.trained_causally = False
         self.trained_acausally = False
 
-        self.device = torch.device(
-            'cuda' if torch.cuda.is_available() else 'cpu')
-
         self.encoders = nn.ModuleList(
             [TransformerEncoder(num_heads, d_model, dff)
              for _ in range(num_enc_layers)])
@@ -153,6 +150,10 @@ class Transformer(nn.Module):
             str(k): nn.Linear(in_features=d_model, out_features=4 ** k)
             for k in k_choices
         })
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
 
     def switch_task(self):
         self.causal = not self.causal

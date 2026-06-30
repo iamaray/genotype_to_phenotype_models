@@ -144,13 +144,23 @@ class PreTrainRecord:
 
 
 def checkpoint_model_weights(model, path):
-    torch.save(model.state_dict(), path)
+    torch.save(_state_dict_to_cpu(model.state_dict()), path)
     return path
 
 
 def checkpoint_embeddings(emb_dict, path):
-    torch.save({k: emb.state_dict() for k, emb in emb_dict.items()}, path)
+    torch.save({
+        k: _state_dict_to_cpu(emb.state_dict())
+        for k, emb in emb_dict.items()
+    }, path)
     return path
+
+
+def _state_dict_to_cpu(state_dict):
+    return {
+        key: value.detach().cpu() if torch.is_tensor(value) else value
+        for key, value in state_dict.items()
+    }
 
 
 def checkpoint_pretraining_state(model, emb_dict, recorder, checkpoint_dir):
@@ -159,12 +169,16 @@ def checkpoint_pretraining_state(model, emb_dict, recorder, checkpoint_dir):
     checkpoint_model_weights(model, checkpoint_dir / "model_weights.pt")
     checkpoint_embeddings(emb_dict, checkpoint_dir / "embeddings.pt")
     recorder.save_records_to_json(checkpoint_dir / "pretrain_record.json")
+    recorder.visualize_records_to_png(checkpoint_dir / "train_val_loss.png")
     return checkpoint_dir
 
 
-def _batch_tokens(batch, device):
-    tokens = batch[0] if isinstance(batch, (list, tuple)) else batch
-    return tokens.to(device)
+def _batch_tokens(batch, k, device):
+    if isinstance(batch, dict):
+        tokens = batch[k]
+    else:
+        tokens = batch
+    return tokens.to(device, non_blocking=True)
 
 
 def _run_causal_batch(
@@ -176,8 +190,8 @@ def _run_causal_batch(
         k_choices,
         _mask_token_id,
         device):
-    tokens = _batch_tokens(batch, device)
     k = random.choice(k_choices)
+    tokens = _batch_tokens(batch, k, device)
     input_tokens = tokens[:, :-1]
     targets = tokens[:, 1:]
     seq_len = input_tokens.size(1)
@@ -221,8 +235,8 @@ def _run_acausal_batch(
         k_choices,
         mask_token_id,
         device):
-    tokens = _batch_tokens(batch, device)
     k = random.choice(k_choices)
+    tokens = _batch_tokens(batch, k, device)
     masked_tokens, patch_mask = mask_tokens(tokens, mask_token_id)
     logits = transformer(
         tok_to_emb(masked_tokens, emb_dict[k]),
@@ -247,6 +261,21 @@ def _log_batch_tokens(recorder, is_train, epoch, k, num_tokens):
         recorder.log_val_tokens(epoch, k, num_tokens)
 
 
+def _embedding_device(embedding):
+    return next(embedding.parameters()).device
+
+
+def _validate_embedding_devices(emb_dict, device):
+    mismatched = [
+        k for k, emb in emb_dict.items()
+        if _embedding_device(emb) != device
+    ]
+    if mismatched:
+        raise ValueError(
+            f"Embeddings for k={mismatched} are not on model device {device}."
+        )
+
+
 def _run_epoch(
         transformer,
         emb_dict,
@@ -259,9 +288,11 @@ def _run_epoch(
         device,
         optimizer=None):
     is_train = optimizer is not None
+    device = transformer.device
     transformer.train(is_train)
     for emb in emb_dict.values():
         emb.train(is_train)
+    _validate_embedding_devices(emb_dict, device)
 
     is_causal = transformer.causal
     batch_step = _run_causal_batch if is_causal else _run_acausal_batch
@@ -388,17 +419,6 @@ def train(
     if k_choices is None:
         k_choices = list(emb_dict.keys())
 
-    recorder = PreTrainRecord(
-        job_id=job_name,
-        model_id=model_id,
-        job_type=job_type,
-        num_epochs=num_epochs,
-        embeddings=emb_dict,
-        mask_token_id=mask_token_id,
-        pad_token_id=pad_token_id,
-        k_choices=k_choices,
-    )
-
     transformer = Transformer(
         model_id,
         num_heads,
@@ -410,6 +430,16 @@ def train(
         causal=is_causal,
     ).to(device)
     emb_dict = {k: emb.to(device) for k, emb in emb_dict.items()}
+    recorder = PreTrainRecord(
+        job_id=job_name,
+        model_id=model_id,
+        job_type=job_type,
+        num_epochs=num_epochs,
+        embeddings=emb_dict,
+        mask_token_id=mask_token_id,
+        pad_token_id=pad_token_id,
+        k_choices=k_choices,
+    )
     embed_param_list = [
         param for emb in emb_dict.values() for param in emb.parameters()
     ]
@@ -419,9 +449,9 @@ def train(
     )
 
     if pad_token_id is None:
-        criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss().to(device)
     else:
-        criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
+        criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id).to(device)
 
     checkpoint_dir = Path("pretraining") / job_name
     for epoch in range(num_epochs):
